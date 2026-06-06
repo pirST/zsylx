@@ -1,4 +1,4 @@
-# zsylx
+# zsylx 
 
 Docker-образ для обхода DPI на базе [zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux)
 (`nfqws` от [bol-van/zapret](https://github.com/bol-van/zapret) + стратегии
