@@ -6,6 +6,9 @@ services:
         # Пусто => рекомендованные (протестированные) версии из constants.sh.
         # Можно зафиксировать, например: ZAPRET_VERSION: v72.9
         ZAPRET_VERSION: ""
+        # ВНИМАНИЕ: это git-ветка/тег/коммит РЕПОЗИТОРИЯ стратегий Flowseal
+        # (напр. "main" или хеш коммита), а НЕ имя .bat-файла.
+        # Чтобы выбрать конкретную стратегию — используйте STRATEGY ниже.
         STRATEGY_VERSION: ""
         XRAY_VERSION: v26.3.27
     image: zsylx:latest
@@ -27,7 +30,7 @@ services:
 
     environment:
       # Стратегия обхода DPI (имя .bat файла из zapret-latest/ или custom-strategies/)
-      STRATEGY: general.bat
+      STRATEGY: general_alt9.bat
       INTERFACE: any
       SOCKS_PORT: "1080"
       HTTP_PORT: "8080"
