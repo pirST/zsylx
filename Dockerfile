@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Stage 1: builder — скачивает nfqws + стратегии (zapret-discord-youtube-linux)
-#          и бинарник Xray-core.
+# Stage 1: builder — скачивает nfqws + стратегии (zapret-discord-youtube-linux),
+#          бинарники Xray-core и dnsproxy.
 # =============================================================================
 FROM debian:bookworm-slim AS builder
 
@@ -12,6 +12,7 @@ ARG ZAPRET_REPO_REF=master
 ARG ZAPRET_VERSION=""
 ARG STRATEGY_VERSION=""
 ARG XRAY_VERSION=v26.3.27
+ARG DNSPROXY_VERSION=v0.84.1
 
 # nftables нужен здесь только для прохождения check_dependencies в service.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,13 +53,30 @@ RUN set -eux; \
     chmod +x /opt/xray-dist/xray; \
     rm -f /tmp/xray.zip
 
+# --- dnsproxy (AdGuardTeam) ---
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64)  dp_arch="amd64" ;; \
+        arm64)  dp_arch="arm64" ;; \
+        armhf)  dp_arch="arm7" ;; \
+        i386)   dp_arch="386" ;; \
+        *) echo "unsupported arch: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/dnsproxy-dist; \
+    curl -fL "https://github.com/AdguardTeam/dnsproxy/releases/download/${DNSPROXY_VERSION}/dnsproxy-linux-${dp_arch}-${DNSPROXY_VERSION}.tar.gz" \
+        -o /tmp/dnsproxy.tar.gz; \
+    tar -xzf /tmp/dnsproxy.tar.gz -C /tmp; \
+    mv "/tmp/linux-${dp_arch}/dnsproxy" /opt/dnsproxy-dist/dnsproxy; \
+    chmod +x /opt/dnsproxy-dist/dnsproxy; \
+    rm -rf /tmp/dnsproxy.tar.gz "/tmp/linux-${dp_arch}"
+
 # =============================================================================
 # Stage 2: runtime
 # =============================================================================
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.title="zsylx" \
-      org.opencontainers.image.description="DPI bypass via zapret (nfqws) + Xray SOCKS5 inbound"
+      org.opencontainers.image.description="DPI bypass via zapret (nfqws) + Xray SOCKS5 inbound + dnsproxy DoH"
 
 # nftables — для NFQUEUE правил; библиотеки — для nfqws; procps — для pgrep/pkill;
 # curl/git/sed/grep — нужны скриптам zapret в рантайме.
@@ -71,6 +89,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Бинарник и ассеты Xray
 COPY --from=builder /opt/xray-dist/xray /usr/local/bin/xray
 COPY --from=builder /opt/xray-dist/*.dat /usr/local/share/xray/
+
+# dnsproxy
+COPY --from=builder /opt/dnsproxy-dist/dnsproxy /usr/local/bin/dnsproxy
 
 # Скрипты + скачанные nfqws/стратегии zapret
 COPY --from=builder /opt/zapret /opt/zapret
@@ -91,7 +112,7 @@ ENV XRAY_LOCATION_ASSET=/usr/local/share/xray \
     STRATEGY=general.bat \
     INTERFACE=any
 
-EXPOSE 1080/tcp 1080/udp 8080/tcp
+EXPOSE 1080/tcp 1080/udp 8080/tcp 53/tcp 53/udp
 
 # Healthcheck: проверяет, что трафик реально ходит через SOCKS5-вход.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=20s --retries=3 \

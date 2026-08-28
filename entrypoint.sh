@@ -2,7 +2,8 @@
 # =============================================================================
 # entrypoint: поднимает zapret (nftables NFQUEUE + nfqws) и запускает Xray
 # в роли SOCKS5-входа. Трафик из freedom-outbound Xray уходит через output-hook
-# и обрабатывается nfqws (обход DPI).
+# и обрабатывается nfqws (обход DPI). Опционально — dnsproxy: его DoH-апстримы
+# идут тем же egress и тоже попадают в nfqws.
 # =============================================================================
 set -e
 
@@ -57,6 +58,7 @@ fi
 cleanup() {
     log "Получен сигнал остановки. Завершение работы..."
     [[ -n "${XRAY_PID:-}" ]] && kill "$XRAY_PID" 2>/dev/null || true
+    [[ -n "${DNSPROXY_PID:-}" ]] && kill "$DNSPROXY_PID" 2>/dev/null || true
     stop_zapret 2>/dev/null || true
     exit 0
 }
@@ -69,9 +71,126 @@ stop_zapret() {
     firewall_clear
 }
 
-# --- Запуск zapret ----------------------------------------------------------
+# Добавить запись в файл, если её ещё нет. nfqws читает списки от nobody.
+append_unique() {
+    local file="$1" value="$2"
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+    chmod 644 "$file" 2>/dev/null || true
+    grep -qxF "$value" "$file" 2>/dev/null && return 0
+    printf '%s\n' "$value" >> "$file"
+}
+
+# Нормализовать токен ZAPRET_EXTRA_HOSTS: срезать схему URL, путь и порт.
+normalize_extra_host() {
+    local token="$1"
+    token="${token%%#*}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    [[ -z "$token" ]] && return 0
+
+    token="${token#https://}"
+    token="${token#http://}"
+    token="${token#tls://}"
+    token="${token#quic://}"
+    token="${token#h3://}"
+    token="${token#udp://}"
+    token="${token#tcp://}"
+    token="${token%%/*}"
+
+    if [[ "$token" == \[*\]* ]]; then
+        token="${token#\[}"
+        token="${token%%\]*}"
+    elif [[ "$token" != *:*:* && "$token" == *:* ]]; then
+        # hostname:port или IPv4:port, но не IPv6
+        token="${token%%:*}"
+    fi
+
+    printf '%s\n' "$token"
+}
+
+# ZAPRET_EXTRA_HOSTS — домены (list-general-user.txt) и IP/CIDR (ipset-all.txt),
+# которые стратегия прогоняет через nfqws сверх штатных списков.
+apply_zapret_extra_hosts() {
+    local raw="${ZAPRET_EXTRA_HOSTS:-}"
+    [[ -z "$raw" ]] && return 0
+
+    local lists_dir="$REPO_DIR/lists"
+    local user_dir="$ZAPRET_DIR/user-lists"
+    mkdir -p "$lists_dir" "$user_dir"
+
+    local hostlist="$lists_dir/list-general-user.txt"
+    local user_hostlist="$user_dir/list-general-user.txt"
+    local ipset="$lists_dir/ipset-all.txt"
+
+    touch "$hostlist" "$user_hostlist" "$ipset"
+    chmod 644 "$hostlist" "$user_hostlist" "$ipset" 2>/dev/null || true
+
+    local data="$raw"
+    if [[ -f "$raw" ]]; then
+        data=$(cat "$raw")
+        log "ZAPRET_EXTRA_HOSTS: читаю список из $raw"
+    fi
+
+    local added_hosts=0 added_ips=0
+    local line token
+    while IFS= read -r line; do
+        # Разделители: запятая / точка с запятой / пробел
+        line="${line//,/ }"
+        line="${line//; / }"
+        line="${line//;/ }"
+        for token in $line; do
+            token=$(normalize_extra_host "$token")
+            [[ -z "$token" ]] && continue
+
+            if [[ "$token" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ || "$token" == *:* ]]; then
+                append_unique "$ipset" "$token"
+                added_ips=$((added_ips + 1))
+            else
+                append_unique "$hostlist" "$token"
+                append_unique "$user_hostlist" "$token"
+                added_hosts=$((added_hosts + 1))
+            fi
+        done
+    done < <(printf '%s\n' "$data")
+
+    log "ZAPRET_EXTRA_HOSTS: доменов=$added_hosts, IP/CIDR=$added_ips"
+}
+
+# DNSPROXY_CONF — аргументы командной строки dnsproxy (как в dnsproxy --help).
+# Пусто = не запускаем. Резолвер контейнера не трогаем: dnsproxy только
+# для внешних клиентов, bootstrap не подставляем.
+start_dnsproxy() {
+    local conf="${DNSPROXY_CONF:-}"
+    [[ -z "$conf" ]] && return 0
+
+    if [[ ! -x /usr/local/bin/dnsproxy ]]; then
+        handle_error "dnsproxy не найден (пересоберите образ)"
+    fi
+
+    log "Запуск dnsproxy: $conf"
+    eval "dnsproxy $conf" &
+    DNSPROXY_PID=$!
+
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! kill -0 "$DNSPROXY_PID" 2>/dev/null; then
+            handle_error "dnsproxy не стартовал"
+        fi
+        sleep 0.2
+    done
+
+    log "dnsproxy запущен (pid=$DNSPROXY_PID), только внешние клиенты"
+}
+
+# --- Extra hosts, затем zapret ----------------------------------------------
+apply_zapret_extra_hosts
+
 log "Запуск zapret: strategy=$strategy, interface=$interface, backend=$FIREWALL_BACKEND"
 run_zapret
+
+# dnsproxy после nfqws, чтобы DoH-апстримы уже шли через очередь
+start_dnsproxy
 
 # --- Подготовка конфига Xray -----------------------------------------------
 # Генерируем рабочий конфиг: SOCKS5-вход + (опционально) HTTP-вход, общий
@@ -141,4 +260,14 @@ xray run -c "$RUNTIME_XRAY_CONFIG" &
 XRAY_PID=$!
 
 log "Готово. nfqws обрабатывает egress контейнера."
+
+if [[ -n "${DNSPROXY_PID:-}" ]]; then
+    wait -n "$XRAY_PID" "$DNSPROXY_PID"
+    code=$?
+    log "Один из процессов завершился (code=$code)"
+    kill "$XRAY_PID" "$DNSPROXY_PID" 2>/dev/null || true
+    stop_zapret 2>/dev/null || true
+    exit "$code"
+fi
+
 wait "$XRAY_PID"

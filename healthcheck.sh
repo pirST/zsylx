@@ -9,6 +9,11 @@ PORT="${SOCKS_PORT:-1080}"
 URL="${HEALTHCHECK_URL:-https://www.gstatic.com/generate_204}"
 TIMEOUT="${HEALTHCHECK_TIMEOUT:-10}"
 
+# Если dnsproxy включён через DNSPROXY_CONF — он должен быть жив.
+if [[ -n "${DNSPROXY_CONF:-}" ]]; then
+    pgrep -x dnsproxy >/dev/null || exit 1
+fi
+
 # Если задана авторизация — передаём её в curl.
 auth_arg=()
 USER="${PROXY_USER:-${SOCKS_USER:-}}"
