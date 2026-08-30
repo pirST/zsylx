@@ -79,11 +79,11 @@ LABEL org.opencontainers.image.title="zsylx" \
       org.opencontainers.image.description="DPI bypass via zapret (nfqws) + Xray SOCKS5 inbound + dnsproxy DoH"
 
 # nftables — для NFQUEUE правил; библиотеки — для nfqws; procps — для pgrep/pkill;
-# curl/git/sed/grep — нужны скриптам zapret в рантайме.
+# curl/git/sed/grep — нужны скриптам zapret в рантайме; openssl — gen-doh-cert.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nftables iproute2 \
         libnetfilter-queue1 libnfnetlink0 libcap2 zlib1g \
-        ca-certificates curl git grep sed coreutils findutils procps bash \
+        ca-certificates curl git grep sed coreutils findutils procps bash openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Бинарник и ассеты Xray
@@ -101,7 +101,11 @@ COPY conf.env /opt/zapret/conf.env
 COPY xray/config.json /opt/xray/config.json
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
+COPY gen-doh-cert.sh /usr/local/bin/gen-doh-cert
+ARG DNSPROXY_TLS_CN=localhost
+ARG DNSPROXY_TLS_DAYS=3650
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/gen-doh-cert \
+    && gen-doh-cert --cn "${DNSPROXY_TLS_CN}" --days "${DNSPROXY_TLS_DAYS}" --force
 
 ENV XRAY_LOCATION_ASSET=/usr/local/share/xray \
     ZAPRET_DIR=/opt/zapret \
@@ -112,7 +116,7 @@ ENV XRAY_LOCATION_ASSET=/usr/local/share/xray \
     STRATEGY=general.bat \
     INTERFACE=any
 
-EXPOSE 1080/tcp 1080/udp 8080/tcp 53/tcp 53/udp
+EXPOSE 1080/tcp 1080/udp 8080/tcp 53/tcp 53/udp 443/tcp 853/tcp 853/udp
 
 # Healthcheck: проверяет, что трафик реально ходит через SOCKS5-вход.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=20s --retries=3 \

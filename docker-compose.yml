@@ -12,6 +12,9 @@ services:
         STRATEGY_VERSION: ""
         XRAY_VERSION: v26.3.27
         DNSPROXY_VERSION: v0.84.1
+        # CN самоподписанного TLS-серта, который кладётся в образ на сборке
+        # (потом можно перевыпустить: docker exec zsylx gen-doh-cert ...)
+        DNSPROXY_TLS_CN: localhost
     image: zsylx:latest
     container_name: zsylx
     restart: unless-stopped
@@ -28,8 +31,9 @@ services:
       - "1080:1080/tcp"   # SOCKS5
       - "1080:1080/udp"   # SOCKS5 (UDP associate)
       - "8080:8080/tcp"   # HTTP-прокси
-      - "53:53/tcp"       # dnsproxy (внешние клиенты)
-      - "53:53/udp"       # dnsproxy (внешние клиенты)
+      - "53:53/tcp"       # dnsproxy (plain DNS, внешние клиенты)
+      - "53:53/udp"       # dnsproxy (plain DNS, внешние клиенты)
+      - "443:443/tcp"     # dnsproxy DoH-сервер
 
     environment:
       # Стратегия обхода DPI (имя .bat файла из zapret-latest/ или custom-strategies/)
@@ -44,10 +48,13 @@ services:
 
       # Аргументы командной строки dnsproxy. Пусто — не запускается.
       # Резолвер контейнера не меняется; dnsproxy только для внешних клиентов.
-      DNSPROXY_CONF: "-l 0.0.0.0 -p 53 -u https://dns.google/dns-query -u https://cloudflare-dns.com/dns-query --cache"
+      # Пример DoH-сервера (серта из образа: /opt/dnsproxy/tls/):
+      # DNSPROXY_CONF: "-l 0.0.0.0 -p 53 -s 443 -c /opt/dnsproxy/tls/cert.pem -k /opt/dnsproxy/tls/key.pem -u https://dns.google/dns-query --cache"
+      DNSPROXY_CONF: ""
       # Домены и IP, которые nfqws обрабатывает сверх списков стратегии.
       # Нужны хосты/IP DoH-апстримов, иначе DPI их не обойдёт.
-      ZAPRET_EXTRA_HOSTS: "dns.google dns.google.com cloudflare-dns.com one.one.one.one mozilla.cloudflare-dns.com dns.adguard-dns.com 8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1"
+      # dns.google dns.google.com cloudflare-dns.com one.one.one.one mozilla.cloudflare-dns.com dns.adguard-dns.com 8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1
+      ZAPRET_EXTRA_HOSTS: ""
 
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]

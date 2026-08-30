@@ -30,6 +30,8 @@ client ──DNS :53──> dnsproxy ──DoH (HTTPS/HTTP3)──► тот ж�
    (резолвер самого контейнера не меняется). Его DoH-апстримы — исходящий
    HTTPS/QUIC контейнера, поэтому проходят через `nfqws`, если хосты/IP
    апстримов указаны в `ZAPRET_EXTRA_HOSTS` (или уже есть в списках стратегии).
+   В режиме DoH-сервера (`-s` / `--https-port`) клиенты ходят на `:443` с
+   сертификатом из `/opt/dnsproxy/tls/`.
 
 Итог: любой клиент, использующий контейнер как SOCKS5- или HTTP-прокси, получает
 обход DPI. Внешний клиент, указывающий контейнер как DNS, получает DoH через
@@ -57,6 +59,7 @@ docker compose up --build -d
 curl -x socks5h://127.0.0.1:1080 https://www.youtube.com -I
 curl -x http://127.0.0.1:8080     https://www.youtube.com -I
 dig @127.0.0.1 youtube.com +short
+curl -vk --doh-url https://127.0.0.1/dns-query https://www.youtube.com -o /dev/null
 ```
 
 ## Запуск без compose
@@ -67,9 +70,9 @@ docker build -t zsylx:latest .
 docker run -d --name zsylx \
   --cap-add=NET_ADMIN \
   -p 1080:1080/tcp -p 1080:1080/udp -p 8080:8080/tcp \
-  -p 53:53/tcp -p 53:53/udp \
+  -p 53:53/tcp -p 53:53/udp -p 443:443/tcp \
   -e STRATEGY=general.bat \
-  -e DNSPROXY_CONF="-l 0.0.0.0 -p 53 -u https://dns.google/dns-query --cache" \
+  -e DNSPROXY_CONF="-l 0.0.0.0 -p 53 -s 443 -c /opt/dnsproxy/tls/cert.pem -k /opt/dnsproxy/tls/key.pem -u https://dns.google/dns-query --cache" \
   -e ZAPRET_EXTRA_HOSTS="dns.google cloudflare-dns.com dns.adguard-dns.com" \
   zsylx:latest
 ```
@@ -100,9 +103,61 @@ docker run -d --name zsylx \
 
 ```yaml
 environment:
-  DNSPROXY_CONF: "-l 0.0.0.0 -p 53 -u https://dns.google/dns-query --cache"
+  DNSPROXY_CONF: "-l 0.0.0.0 -p 53 -s 443 -c /opt/dnsproxy/tls/cert.pem -k /opt/dnsproxy/tls/key.pem -u https://dns.google/dns-query --cache"
   ZAPRET_EXTRA_HOSTS: "dns.google 8.8.8.8"
 ```
+
+В образ на сборке кладётся самоподписанный сертификат, его можно
+**перевыпустить в работающем контейнере** скриптом `gen-doh-cert`:
+
+| Путь | Назначение |
+|------|------------|
+| `/opt/dnsproxy/tls/cert.pem` | `--tls-crt` / `-c` |
+| `/opt/dnsproxy/tls/key.pem` | `--tls-key` / `-k` |
+
+```bash
+# справка
+docker exec zsylx gen-doh-cert --help
+
+# CN = имя, которое клиент пишет в URL DoH (https://<CN>/dns-query)
+docker exec zsylx gen-doh-cert --cn dns.example.com --san dns.example.com --force
+
+# плюс IP, если клиенты ходят по адресу
+docker exec zsylx gen-doh-cert -n 192.168.1.10 -s 192.168.1.10 -s dns.lan -f
+```
+
+| Опция | По умолчанию | Описание |
+|-------|--------------|----------|
+| `-n` / `--cn` | `localhost` (или `DNSPROXY_TLS_CN`) | Common Name сертификата |
+| `-d` / `--days` | `3650` | Срок действия, дни |
+| `-s` / `--san` | CN, `localhost`, `127.0.0.1` | Дополнительный SAN (домен или IP), можно несколько раз |
+| `-o` / `--out` | `/opt/dnsproxy/tls` | Каталог для `cert.pem` и `key.pem` |
+| `-f` / `--force` | — | Перезаписать уже существующие файлы |
+
+После генерации **перезапустите контейнер**, чтобы dnsproxy открыл новые файлы:
+
+```bash
+docker restart zsylx
+```
+
+Без `--force` скрипт не трогает уже лежащие cert/key. Если каталог
+`/opt/dnsproxy/tls` смонтирован томом, сертификат сохранится между
+пересозданиями контейнера.
+
+Готовый cert/key с хоста — томом поверх той же директории:
+
+```yaml
+volumes:
+  - ./cert.pem:/opt/dnsproxy/tls/cert.pem:ro
+  - ./key.pem:/opt/dnsproxy/tls/key.pem:ro
+```
+
+CN на сборке образа задаётся build-arg `DNSPROXY_TLS_CN` (срок —
+`DNSPROXY_TLS_DAYS=3650`). Это только стартовый сертификат; для своего
+домена удобнее `gen-doh-cert` в уже запущенном контейнере.
+
+DoT: `-t 853`, DoQ: `-q 853` (те же `-c`/`-k`). Клиентам нужен `--doh-insecure`
+или импорт этого сертификата: он самоподписанный.
 
 Домены из `ZAPRET_EXTRA_HOSTS` попадают в `list-general-user.txt`,
 IP и CIDR — в `ipset-all.txt`. Стратегии Flowseal уже подключают оба списка.
@@ -149,6 +204,8 @@ docker run -d --name zsylx --cap-add=NET_ADMIN -p 1080:1080 \
 | `STRATEGY_VERSION` | (пусто)      | Коммит/тег стратегий Flowseal. Пусто = рекомендованная |
 | `XRAY_VERSION`     | `v26.3.27`   | Тег релиза Xray-core                                |
 | `DNSPROXY_VERSION` | `v0.84.1`    | Тег релиза [dnsproxy](https://github.com/AdguardTeam/dnsproxy) |
+| `DNSPROXY_TLS_CN`  | `localhost`  | CN стартового самоподписанного серта (перевыпуск: `gen-doh-cert`) |
+| `DNSPROXY_TLS_DAYS`| `3650`       | Срок этого сертификата на сборке (дни) |
 
 Пример:
 
